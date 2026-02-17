@@ -7,10 +7,11 @@ import json
 import os
 import re
 import uuid
+import time
 import httpx
 from duckduckgo_search import DDGS
 
-app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.1.0")
+app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.2.0")
 
 # Economic Tracker
 class EconomicTracker:
@@ -61,22 +62,7 @@ class ResearchRequest(BaseModel):
     target_market: str = "global"
     specific_questions: Optional[str] = None
 
-# OpenClaw Research Engine using duckduckgo-search library
-def search_ddg(query: str, max_results: int = 8) -> List[Dict]:
-    """Search DuckDuckGo using official library"""
-    try:
-        with DDGS() as ddgs:
-            results = []
-            for r in ddgs.text(query, max_results=max_results):
-                results.append({
-                    "title": r.get("title", ""),
-                    "url": r.get("href", ""),
-                    "snippet": r.get("body", "")
-                })
-            return results
-    except Exception as e:
-        return [{"error": str(e), "title": "", "url": "", "snippet": f"Search error: {e}"}]
-
+# OpenClaw Research Engine v2.2 - single DDGS instance with delays
 def run_research(industry: str, target_market: str) -> Dict:
     """Execute full market research pipeline"""
     task_id = f"research_{uuid.uuid4().hex[:8]}"
@@ -98,16 +84,29 @@ def run_research(industry: str, target_market: str) -> Dict:
         "pricing": f"{industry} pricing strategy {target_market}",
     }
 
+    ddgs = DDGS()
     for section_name, query in queries.items():
-        results = search_ddg(query)
-        findings = [r.get("snippet", "") for r in results if r.get("snippet") and "error" not in r]
-        sources = [r.get("url", "") for r in results if r.get("url") and "error" not in r]
-        report["sections"][section_name] = {
-            "query": query,
-            "sources": len(sources),
-            "source_urls": sources[:5],
-            "key_findings": findings[:5],
-        }
+        try:
+            results = list(ddgs.text(query, max_results=8))
+            findings = [r.get("body", "") for r in results if r.get("body")]
+            sources = [r.get("href", "") for r in results if r.get("href")]
+            titles = [r.get("title", "") for r in results if r.get("title")]
+            report["sections"][section_name] = {
+                "query": query,
+                "sources": len(sources),
+                "source_urls": sources[:5],
+                "source_titles": titles[:5],
+                "key_findings": findings[:5],
+            }
+        except Exception as e:
+            report["sections"][section_name] = {
+                "query": query,
+                "sources": 0,
+                "source_urls": [],
+                "source_titles": [],
+                "key_findings": [f"Search error: {str(e)}"],
+            }
+        time.sleep(2)
 
     tracker.track_income(25.00)
     report["economics"] = tracker.get_status()
@@ -116,7 +115,7 @@ def run_research(industry: str, target_market: str) -> Dict:
 # API Endpoints
 @app.get("/")
 def root():
-    return {"message": "ClawWork + OpenClaw API", "status": "active", "version": "2.1.0"}
+    return {"message": "ClawWork + OpenClaw API", "status": "active", "version": "2.2.0"}
 
 @app.get("/status")
 def get_status():
