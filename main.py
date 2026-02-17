@@ -7,10 +7,10 @@ import json
 import os
 import re
 import uuid
-
 import httpx
+from duckduckgo_search import DDGS
 
-app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.0.0")
+app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.1.0")
 
 # Economic Tracker
 class EconomicTracker:
@@ -61,24 +61,23 @@ class ResearchRequest(BaseModel):
     target_market: str = "global"
     specific_questions: Optional[str] = None
 
-# OpenClaw Research Engine
-async def search_ddg(query: str) -> List[Dict]:
-    """Search DuckDuckGo HTML for research data"""
-    async with httpx.AsyncClient(timeout=30) as client:
-        try:
-            r = await client.post("https://html.duckduckgo.com/html/", data={"q": query})
+# OpenClaw Research Engine using duckduckgo-search library
+def search_ddg(query: str, max_results: int = 8) -> List[Dict]:
+    """Search DuckDuckGo using official library"""
+    try:
+        with DDGS() as ddgs:
             results = []
-            links = re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)', r.text)
-            snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', r.text, re.DOTALL)
-            for i, (link, title) in enumerate(links[:8]):
-                snippet = snippets[i] if i < len(snippets) else ""
-                snippet = re.sub(r'<[^>]+>', '', snippet).strip()
-                results.append({"url": link, "title": title.strip(), "snippet": snippet})
+            for r in ddgs.text(query, max_results=max_results):
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "snippet": r.get("body", "")
+                })
             return results
-        except Exception as e:
-            return [{"error": str(e)}]
+    except Exception as e:
+        return [{"error": str(e), "title": "", "url": "", "snippet": f"Search error: {e}"}]
 
-async def run_research(industry: str, target_market: str) -> Dict:
+def run_research(industry: str, target_market: str) -> Dict:
     """Execute full market research pipeline"""
     task_id = f"research_{uuid.uuid4().hex[:8]}"
     tracker.track_cost(0.50)
@@ -100,11 +99,14 @@ async def run_research(industry: str, target_market: str) -> Dict:
     }
 
     for section_name, query in queries.items():
-        results = await search_ddg(query)
+        results = search_ddg(query)
+        findings = [r.get("snippet", "") for r in results if r.get("snippet") and "error" not in r]
+        sources = [r.get("url", "") for r in results if r.get("url") and "error" not in r]
         report["sections"][section_name] = {
             "query": query,
-            "sources": len(results),
-            "key_findings": [r.get("snippet", "") for r in results[:5] if r.get("snippet")],
+            "sources": len(sources),
+            "source_urls": sources[:5],
+            "key_findings": findings[:5],
         }
 
     tracker.track_income(25.00)
@@ -114,7 +116,7 @@ async def run_research(industry: str, target_market: str) -> Dict:
 # API Endpoints
 @app.get("/")
 def root():
-    return {"message": "ClawWork + OpenClaw API", "status": "active", "version": "2.0.0"}
+    return {"message": "ClawWork + OpenClaw API", "status": "active", "version": "2.1.0"}
 
 @app.get("/status")
 def get_status():
@@ -135,9 +137,9 @@ def complete_task(result: TaskResult):
     return {"task_id": result.task_id, "status": "completed" if result.success else "failed", "economics": tracker.get_status()}
 
 @app.post("/research")
-async def do_research(req: ResearchRequest):
+def do_research(req: ResearchRequest):
     """OpenClaw: Run automated market research"""
-    report = await run_research(req.industry, req.target_market)
+    report = run_research(req.industry, req.target_market)
     return report
 
 @app.get("/health")
