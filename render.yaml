@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: clawwork-api
+    runtime: docker
+    repo: https://github.com/zenc-cp/clawwork-cloud-api
+    branch: main
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
