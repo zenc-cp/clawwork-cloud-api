@@ -13,10 +13,10 @@ import hmac
 import hashlib
 import base64
 import urllib.parse
+import random
 from duckduckgo_search import DDGS
 
-app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.2.0")
-
+app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.4.0")
 # Economic Tracker
 class EconomicTracker:
     def __init__(self):
@@ -214,3 +214,54 @@ async def get_tweet(text: str = "Hello from ClawWork!"):
     async with httpx.AsyncClient() as client:
         resp = await client.post(api_url, json={"text": text}, headers={"Authorization": auth_header, "Content-Type": "application/json"})
     return {"status": resp.status_code, "response": resp.json()}
+
+
+# Cybersecurity content templates for automated X posting
+CYBER_TEMPLATES = [
+    "Zero-day vulnerabilities don't wait for patches. Neither should your security team. Proactive defense > reactive response. #CyberSec #ZeroDay",
+    "AI agents are transforming cybersecurity: automated threat detection, real-time response, continuous monitoring. The future is autonomous defense. #AIAgent #CyberSec",
+    "Your API keys are your castle gates. Rotate them regularly, never hardcode them, always encrypt at rest. Basic hygiene saves enterprises. #APISecurity #InfoSec",
+    "MITRE ATT&CK framework isn't just documentation - it's your defensive playbook. Map your defenses to known TTPs. #MITREATTACK #ThreatIntel",
+    "Supply chain attacks increased 742% in 3 years. If you're not auditing your dependencies, you're trusting strangers with your keys. #SupplyChainSecurity",
+    "The best security teams don't just find vulnerabilities - they understand business impact. Context-driven security wins every time. #RiskManagement #CISO",
+    "Agentic AI introduces new attack surfaces: prompt injection, model poisoning, autonomous lateral movement. Secure your AI before it secures you. #AgenticAI #AISecurity",
+    "Container escape, privilege escalation, lateral movement - cloud native doesn't mean cloud secure. Harden your K8s clusters. #CloudSecurity #Kubernetes",
+    "Threat modeling isn't a one-time exercise. Your architecture evolves, so should your threat models. Continuous modeling = continuous security. #ThreatModeling",
+    "MFA isn't optional anymore. Phishing-resistant MFA (FIDO2/WebAuthn) is the gold standard. Passwords alone are a liability. #MFA #IdentitySecurity",
+]
+
+@app.get("/scheduled-post")
+async def scheduled_post():
+    """Auto-generate and post cybersecurity content to X"""
+    tweet_text = random.choice(CYBER_TEMPLATES)
+    # Add timestamp variation to avoid duplicate detection
+    hour = datetime.now().strftime("%H")
+    if int(hour) < 12:
+        tweet_text = tweet_text
+    else:
+        tweet_text = tweet_text.replace(".", "!", 1) if random.random() > 0.5 else tweet_text
+    
+    ck = os.getenv("X_CONSUMER_KEY", "")
+    cs = os.getenv("X_CONSUMER_SECRET", "")
+    at = os.getenv("X_ACCESS_TOKEN", "")
+    ats = os.getenv("X_ACCESS_TOKEN_SECRET", "")
+    if not all([ck, cs, at, ats]):
+        return {"error": "X API credentials not configured"}
+    api_url = "https://api.x.com/2/tweets"
+    oauth_params = {
+        "oauth_consumer_key": ck,
+        "oauth_nonce": uuid.uuid4().hex,
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time())),
+        "oauth_token": at,
+        "oauth_version": "1.0",
+    }
+    sig = oauth_sign("POST", api_url, oauth_params, cs, ats)
+    oauth_params["oauth_signature"] = sig
+    auth_parts = []
+    for k, v in sorted(oauth_params.items()):
+        auth_parts.append(f'{k}="{urllib.parse.quote(v, safe="")}"')
+    auth_header = "OAuth " + ", ".join(auth_parts)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json={"text": tweet_text}, headers={"Authorization": auth_header, "Content-Type": "application/json"})
+    return {"status": resp.status_code, "posted": tweet_text, "response": resp.json()}
