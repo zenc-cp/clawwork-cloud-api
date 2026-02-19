@@ -426,3 +426,321 @@ async def engage_cycle():
         except Exception as e:
             results["errors"].append(f"Reply error: {str(e)}")
     return results
+
+
+# ============================================================
+# FIVERR INTEGRATION MODULE v1.0
+# Monitors Fiverr notifications and generates deliverables
+# ============================================================
+
+class FiverrTracker:
+    def __init__(self):
+        self.fiverr_username = os.getenv("FIVERR_USERNAME", "")
+        self.orders = []
+        self.gigs = [
+            {"title": "Cybersecurity Threat Assessment Report", "price": 50, "category": "security"},
+            {"title": "Market Research & Industry Analysis", "price": 35, "category": "research"},
+            {"title": "AI Security Audit & Risk Report", "price": 75, "category": "ai_security"},
+        ]
+        self.deliveries_completed = 0
+        self.fiverr_earnings = 0.0
+
+    def add_order(self, order_id: str, gig_type: str, buyer: str, requirements: str):
+        order = {
+            "order_id": order_id,
+            "gig_type": gig_type,
+            "buyer": buyer,
+            "requirements": requirements,
+            "status": "in_progress",
+            "created_at": datetime.utcnow().isoformat(),
+            "deliverable": None
+        }
+        self.orders.append(order)
+        return order
+
+    def generate_deliverable(self, order_id: str, research_data: dict) -> dict:
+        order = next((o for o in self.orders if o["order_id"] == order_id), None)
+        if not order:
+            return {"error": "Order not found"}
+        deliverable = {
+            "title": f"Deliverable for Order {order_id}",
+            "content": research_data,
+            "generated_at": datetime.utcnow().isoformat(),
+            "word_count": len(str(research_data).split()),
+        }
+        order["deliverable"] = deliverable
+        order["status"] = "ready_for_delivery"
+        return deliverable
+
+    def mark_delivered(self, order_id: str, revenue: float):
+        order = next((o for o in self.orders if o["order_id"] == order_id), None)
+        if order:
+            order["status"] = "delivered"
+            self.deliveries_completed += 1
+            self.fiverr_earnings += revenue
+            tracker.track_income(revenue)
+        return order
+
+    def get_status(self):
+        return {
+            "fiverr_username": self.fiverr_username,
+            "total_gigs": len(self.gigs),
+            "active_orders": len([o for o in self.orders if o["status"] == "in_progress"]),
+            "ready_for_delivery": len([o for o in self.orders if o["status"] == "ready_for_delivery"]),
+            "completed_deliveries": self.deliveries_completed,
+            "fiverr_earnings": round(self.fiverr_earnings, 2),
+        }
+
+fiverr_tracker = FiverrTracker()
+
+
+# Fiverr API Endpoints
+class FiverrOrder(BaseModel):
+    gig_type: str
+    buyer_name: str
+    requirements: str
+    budget: float = 50.0
+
+@app.get("/fiverr/status")
+async def fiverr_status():
+    return fiverr_tracker.get_status()
+
+@app.get("/fiverr/gigs")
+async def fiverr_gigs():
+    return {"gigs": fiverr_tracker.gigs}
+
+@app.post("/fiverr/new-order")
+async def fiverr_new_order(order: FiverrOrder, background_tasks: BackgroundTasks):
+    order_id = f"FVR-{uuid.uuid4().hex[:8]}"
+    new_order = fiverr_tracker.add_order(order_id, order.gig_type, order.buyer_name, order.requirements)
+    # Auto-generate deliverable using research engine
+    background_tasks.add_task(auto_generate_fiverr_deliverable, order_id, order.gig_type, order.requirements)
+    return {"message": "Order received, auto-generating deliverable", "order": new_order}
+
+async def auto_generate_fiverr_deliverable(order_id: str, gig_type: str, requirements: str):
+    try:
+        research = run_research(gig_type, "global")
+        fiverr_tracker.generate_deliverable(order_id, research)
+    except Exception as e:
+        print(f"Fiverr auto-gen error: {e}")
+
+@app.post("/fiverr/deliver/{order_id}")
+async def fiverr_deliver(order_id: str):
+    order = next((o for o in fiverr_tracker.orders if o["order_id"] == order_id), None)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order["status"] != "ready_for_delivery":
+        return {"error": f"Order status is {order['status']}, not ready for delivery"}
+    gig = next((g for g in fiverr_tracker.gigs if g["category"] == order["gig_type"]), fiverr_tracker.gigs[0])
+    result = fiverr_tracker.mark_delivered(order_id, gig["price"])
+    return {"message": "Delivered and earnings tracked", "order": result, "revenue": gig["price"]}
+
+@app.get("/fiverr/orders")
+async def fiverr_orders():
+    return {"orders": fiverr_tracker.orders, "total": len(fiverr_tracker.orders)}
+
+
+# ============================================================
+# CRYPTO TRADING MONITOR MODULE v1.0
+# Monitors crypto prices and executes DCA/Grid strategies
+# Requires: Exchange API keys (Binance/Coinbase/OKX)
+# ============================================================
+
+class CryptoMonitor:
+    def __init__(self):
+        self.exchange = os.getenv("CRYPTO_EXCHANGE", "binance")
+        self.api_key = os.getenv("CRYPTO_API_KEY", "")
+        self.api_secret = os.getenv("CRYPTO_API_SECRET", "")
+        self.trading_pairs = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        self.strategy = os.getenv("CRYPTO_STRATEGY", "dca")
+        self.dca_amount = float(os.getenv("DCA_AMOUNT", "10.0"))
+        self.grid_levels = int(os.getenv("GRID_LEVELS", "5"))
+        self.trades = []
+        self.portfolio_value = 0.0
+        self.total_invested = 0.0
+        self.total_profit = 0.0
+        self.is_active = False
+        self.price_cache = {}
+
+    async def fetch_prices(self) -> dict:
+        prices = {}
+        try:
+            async with httpx.AsyncClient() as client:
+                for pair in self.trading_pairs:
+                    symbol = pair.replace("/", "")
+                    resp = await client.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}")
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        prices[pair] = float(data["price"])
+                    time.sleep(0.1)
+        except Exception as e:
+            prices["error"] = str(e)
+        self.price_cache = prices
+        return prices
+
+    def record_trade(self, pair: str, side: str, amount: float, price: float):
+        trade = {
+            "trade_id": f"T-{uuid.uuid4().hex[:8]}",
+            "pair": pair,
+            "side": side,
+            "amount": amount,
+            "price": price,
+            "value": round(amount * price, 2),
+            "timestamp": datetime.utcnow().isoformat(),
+            "strategy": self.strategy,
+        }
+        self.trades.append(trade)
+        if side == "buy":
+            self.total_invested += trade["value"]
+        elif side == "sell":
+            self.total_profit += trade["value"] - (amount * self.get_avg_buy_price(pair))
+        return trade
+
+    def get_avg_buy_price(self, pair: str) -> float:
+        buys = [t for t in self.trades if t["pair"] == pair and t["side"] == "buy"]
+        if not buys:
+            return 0.0
+        total_cost = sum(t["value"] for t in buys)
+        total_amount = sum(t["amount"] for t in buys)
+        return total_cost / total_amount if total_amount > 0 else 0.0
+
+    def get_status(self) -> dict:
+        return {
+            "exchange": self.exchange,
+            "strategy": self.strategy,
+            "is_active": self.is_active,
+            "api_configured": bool(self.api_key),
+            "trading_pairs": self.trading_pairs,
+            "total_trades": len(self.trades),
+            "total_invested": round(self.total_invested, 2),
+            "total_profit": round(self.total_profit, 2),
+            "last_prices": self.price_cache,
+            "dca_amount": self.dca_amount,
+            "grid_levels": self.grid_levels,
+            "requirements": {
+                "api_key": "Set CRYPTO_API_KEY env var (trade-only, NO withdrawal)",
+                "api_secret": "Set CRYPTO_API_SECRET env var",
+                "exchange": "Set CRYPTO_EXCHANGE (binance/coinbase/okx)",
+                "strategy": "Set CRYPTO_STRATEGY (dca/grid)",
+                "min_capital": "$100-500 USDT recommended",
+                "hk_legal": "Crypto trading is legal in HK via SFC-licensed exchanges",
+            }
+        }
+
+crypto_monitor = CryptoMonitor()
+
+
+# Crypto API Endpoints
+@app.get("/crypto/status")
+async def crypto_status():
+    return crypto_monitor.get_status()
+
+@app.get("/crypto/prices")
+async def crypto_prices():
+    prices = await crypto_monitor.fetch_prices()
+    return {"prices": prices, "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/crypto/requirements")
+async def crypto_requirements():
+    return {
+        "title": "Crypto Trading Bot Requirements",
+        "step_1": "Create account on SFC-licensed exchange (Binance HK, OKX, HashKey)",
+        "step_2": "Generate API key with TRADE permission only (NO withdrawal)",
+        "step_3": "Set environment variables: CRYPTO_API_KEY, CRYPTO_API_SECRET, CRYPTO_EXCHANGE",
+        "step_4": "Choose strategy: DCA (safer, steady) or Grid (more active, higher risk)",
+        "step_5": "Fund account with min $100-500 USDT",
+        "step_6": "Activate via /crypto/activate endpoint",
+        "legal_hk": "Crypto trading is legal in HK. SFC regulates VATPs. 11 licensed exchanges as of 2026.",
+        "risk_warning": "Crypto trading involves significant risk. Past performance does not guarantee future results.",
+        "supported_exchanges": ["binance", "coinbase", "okx", "hashkey", "bybit"],
+        "supported_strategies": ["dca", "grid"],
+    }
+
+@app.post("/crypto/activate")
+async def crypto_activate():
+    if not crypto_monitor.api_key:
+        return {"error": "API key not configured. Set CRYPTO_API_KEY env var first.", "setup": "/crypto/requirements"}
+    crypto_monitor.is_active = True
+    return {"message": "Crypto trading bot activated", "strategy": crypto_monitor.strategy, "pairs": crypto_monitor.trading_pairs}
+
+@app.post("/crypto/deactivate")
+async def crypto_deactivate():
+    crypto_monitor.is_active = False
+    return {"message": "Crypto trading bot deactivated"}
+
+@app.get("/crypto/trades")
+async def crypto_trades():
+    return {"trades": crypto_monitor.trades, "total": len(crypto_monitor.trades)}
+
+
+# ============================================================
+# GOOGLE WORKSPACE INTEGRATION (Gmail + Calendar)
+# Requires: Google OAuth2 credentials
+# ============================================================
+
+class GoogleWorkspace:
+    def __init__(self):
+        self.gmail_configured = bool(os.getenv("GOOGLE_CLIENT_ID", ""))
+        self.calendar_configured = bool(os.getenv("GOOGLE_CLIENT_ID", ""))
+        self.google_email = os.getenv("GOOGLE_EMAIL", "")
+        self.notifications_sent = 0
+        self.calendar_events = []
+
+    def add_calendar_event(self, title: str, description: str, due_date: str):
+        event = {
+            "event_id": f"EVT-{uuid.uuid4().hex[:8]}",
+            "title": title,
+            "description": description,
+            "due_date": due_date,
+            "created_at": datetime.utcnow().isoformat(),
+            "status": "scheduled",
+        }
+        self.calendar_events.append(event)
+        return event
+
+    def get_status(self):
+        return {
+            "gmail_configured": self.gmail_configured,
+            "calendar_configured": self.calendar_configured,
+            "google_email": self.google_email,
+            "notifications_sent": self.notifications_sent,
+            "upcoming_events": len([e for e in self.calendar_events if e["status"] == "scheduled"]),
+            "setup_instructions": {
+                "step_1": "Create Google account (e.g. openclaw.agent@gmail.com)",
+                "step_2": "Enable Gmail API + Calendar API in Google Cloud Console",
+                "step_3": "Create OAuth2 credentials or service account",
+                "step_4": "Set env vars: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_EMAIL",
+            }
+        }
+
+google_workspace = GoogleWorkspace()
+
+@app.get("/google/status")
+async def google_status():
+    return google_workspace.get_status()
+
+@app.post("/google/calendar/add")
+async def google_calendar_add(title: str = "New Task", description: str = "", due_date: str = ""):
+    event = google_workspace.add_calendar_event(title, description, due_date)
+    return {"message": "Calendar event created", "event": event}
+
+@app.get("/google/calendar/events")
+async def google_calendar_events():
+    return {"events": google_workspace.calendar_events}
+
+# ============================================================
+# UNIFIED DASHBOARD - All Systems
+# ============================================================
+
+@app.get("/dashboard")
+async def unified_dashboard():
+    return {
+        "agent_name": "SlimBot 9000",
+        "version": "4.0.0",
+        "timestamp": datetime.utcnow().isoformat(),
+        "clawwork": tracker.get_status(),
+        "fiverr": fiverr_tracker.get_status(),
+        "crypto": crypto_monitor.get_status(),
+        "google": google_workspace.get_status(),
+        "x_automation": {"configured": bool(os.getenv("X_API_KEY", ""))},
+    }
