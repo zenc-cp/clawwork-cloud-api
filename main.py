@@ -16,8 +16,7 @@ import urllib.parse
 import random
 from duckduckgo_search import DDGS
 
-app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.4.0")
-# Economic Tracker
+app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="3.0.0")              # Economic Tracker
 class EconomicTracker:
     def __init__(self):
         self.balance = float(os.getenv("INITIAL_BALANCE", "10.0"))
@@ -265,3 +264,163 @@ async def scheduled_post():
     async with httpx.AsyncClient() as client:
         resp = await client.post(api_url, json={"text": tweet_text}, headers={"Authorization": auth_header, "Content-Type": "application/json"})
     return {"status": resp.status_code, "posted": tweet_text, "response": resp.json()}
+
+# ========== X ENGAGEMENT AUTOMATION (v3.0) ==========
+# Helper: build OAuth header for any X API call
+def build_oauth_header(method, url, extra_params=None):
+    ck = os.getenv("X_CONSUMER_KEY", "")
+    cs = os.getenv("X_CONSUMER_SECRET", "")
+    at = os.getenv("X_ACCESS_TOKEN", "")
+    ats = os.getenv("X_ACCESS_TOKEN_SECRET", "")
+    if not all([ck, cs, at, ats]):
+        return None, "X API credentials not configured"
+    oauth_params = {
+        "oauth_consumer_key": ck,
+        "oauth_nonce": uuid.uuid4().hex,
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time())),
+        "oauth_token": at,
+        "oauth_version": "1.0",
+    }
+    all_params = {**oauth_params}
+    if extra_params:
+        all_params.update(extra_params)
+    sig = oauth_sign(method, url, all_params, cs, ats)
+    oauth_params["oauth_signature"] = sig
+    auth_parts = []
+    for k, v in sorted(oauth_params.items()):
+        auth_parts.append(f'{k}="{urllib.parse.quote(v, safe="")}"')
+    return "OAuth " + ", ".join(auth_parts), None
+
+# Get authenticated user ID
+USER_ID = os.getenv("X_USER_ID", "15471332")
+
+class ReplyRequest(BaseModel):
+    tweet_id: str
+    text: str
+
+@app.post("/reply")
+async def reply_to_tweet(req: ReplyRequest):
+    """Reply to a specific tweet"""
+    api_url = "https://api.x.com/2/tweets"
+    auth_header, err = build_oauth_header("POST", api_url)
+    if err:
+        raise HTTPException(status_code=500, detail=err)
+    payload = {"text": req.text, "reply": {"in_reply_to_tweet_id": req.tweet_id}}
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json=payload, headers={"Authorization": auth_header, "Content-Type": "application/json"})
+    return {"status": resp.status_code, "response": resp.json()}
+
+class LikeRequest(BaseModel):
+    tweet_id: str
+
+@app.post("/like")
+async def like_tweet(req: LikeRequest):
+    """Like a tweet"""
+    api_url = f"https://api.x.com/2/users/{USER_ID}/likes"
+    auth_header, err = build_oauth_header("POST", api_url)
+    if err:
+        raise HTTPException(status_code=500, detail=err)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json={"tweet_id": req.tweet_id}, headers={"Authorization": auth_header, "Content-Type": "application/json"})
+    return {"status": resp.status_code, "response": resp.json()}
+
+class RetweetRequest(BaseModel):
+    tweet_id: str
+
+@app.post("/retweet")
+async def retweet(req: RetweetRequest):
+    """Retweet a tweet"""
+    api_url = f"https://api.x.com/2/users/{USER_ID}/retweets"
+    auth_header, err = build_oauth_header("POST", api_url)
+    if err:
+        raise HTTPException(status_code=500, detail=err)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json={"tweet_id": req.tweet_id}, headers={"Authorization": auth_header, "Content-Type": "application/json"})
+    return {"status": resp.status_code, "response": resp.json()}
+
+@app.get("/mentions")
+async def get_mentions(max_results: int = 10):
+    """Fetch recent mentions (uses read quota - 100/month on Free tier)"""
+    api_url = f"https://api.x.com/2/users/{USER_ID}/mentions"
+    params = {"max_results": str(min(max_results, 100)), "tweet.fields": "created_at,author_id,conversation_id"}
+    auth_header, err = build_oauth_header("GET", api_url, params)
+    if err:
+        raise HTTPException(status_code=500, detail=err)
+    query_str = "&".join(f"{k}={urllib.parse.quote(v, safe='')}" for k, v in params.items())
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{api_url}?{query_str}", headers={"Authorization": auth_header})
+    return {"status": resp.status_code, "response": resp.json()}
+
+# Smart reply templates for engagement
+REPLY_TEMPLATES = {
+    "security": [
+        "Great point on security! Defense-in-depth is always the way to go.",
+        "This is crucial for any security team. Proactive beats reactive every time.",
+        "Solid take. The threat landscape is evolving fast - staying ahead is key.",
+    ],
+    "ai": [
+        "AI in cybersecurity is a game-changer. Autonomous detection is the future.",
+        "The intersection of AI and security is where the real innovation happens.",
+        "Agentic AI is reshaping how we think about defense. Exciting times.",
+    ],
+    "general": [
+        "Interesting perspective! Would love to dive deeper on this.",
+        "Thanks for sharing. This resonates with what we're building at OpenClaw.",
+        "Well said. The community needs more discussions like this.",
+    ],
+}
+
+@app.get("/engage-cycle")
+async def engage_cycle():
+    """Full engagement cycle: fetch mentions, auto-reply, auto-like"""
+    results = {"mentions_fetched": 0, "replies_sent": 0, "likes_given": 0, "errors": []}
+    # Step 1: Fetch mentions
+    api_url = f"https://api.x.com/2/users/{USER_ID}/mentions"
+    params = {"max_results": "5", "tweet.fields": "created_at,author_id,text"}
+    auth_header, err = build_oauth_header("GET", api_url, params)
+    if err:
+        return {"error": err}
+    query_str = "&".join(f"{k}={urllib.parse.quote(v, safe='')}" for k, v in params.items())
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{api_url}?{query_str}", headers={"Authorization": auth_header})
+    if resp.status_code != 200:
+        results["errors"].append(f"Mentions fetch failed: {resp.status_code} - {resp.text}")
+        return results
+    data = resp.json()
+    mentions = data.get("data", [])
+    results["mentions_fetched"] = len(mentions)
+    # Step 2: For each mention, like + reply
+    for mention in mentions[:3]:
+        tweet_id = mention["id"]
+        tweet_text = mention.get("text", "").lower()
+        # Determine reply category
+        if any(w in tweet_text for w in ["security", "threat", "vulnerability", "hack", "breach", "cyber"]):
+            category = "security"
+        elif any(w in tweet_text for w in ["ai", "agent", "model", "llm", "autonomous", "machine learning"]):
+            category = "ai"
+        else:
+            category = "general"
+        reply_text = random.choice(REPLY_TEMPLATES[category])
+        # Like the mention
+        try:
+            like_url = f"https://api.x.com/2/users/{USER_ID}/likes"
+            like_auth, _ = build_oauth_header("POST", like_url)
+            if like_auth:
+                like_resp = await client.post(like_url, json={"tweet_id": tweet_id}, headers={"Authorization": like_auth, "Content-Type": "application/json"})
+                if like_resp.status_code in [200, 201]:
+                    results["likes_given"] += 1
+        except Exception as e:
+            results["errors"].append(f"Like error: {str(e)}")
+        # Reply to the mention
+        try:
+            reply_url = "https://api.x.com/2/tweets"
+            reply_auth, _ = build_oauth_header("POST", reply_url)
+            if reply_auth:
+                reply_payload = {"text": reply_text, "reply": {"in_reply_to_tweet_id": tweet_id}}
+                reply_resp = await client.post(reply_url, json=reply_payload, headers={"Authorization": reply_auth, "Content-Type": "application/json"})
+                if reply_resp.status_code in [200, 201]:
+                    results["replies_sent"] += 1
+        except Exception as e:
+            results["errors"].append(f"Reply error: {str(e)}")
+    return results
