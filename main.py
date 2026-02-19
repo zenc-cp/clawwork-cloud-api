@@ -407,7 +407,8 @@ async def engage_cycle():
             like_url = f"https://api.x.com/2/users/{USER_ID}/likes"
             like_auth, _ = build_oauth_header("POST", like_url)
             if like_auth:
-                like_resp = await client.post(like_url, json={"tweet_id": tweet_id}, headers={"Authorization": like_auth, "Content-Type": "application/json"})
+                                async with httpx.AsyncClient() as c:
+                    like_resp = await c.post(like_url, json={"tweet_id": tweet_id}, headers={"Authorization": like_auth, "Content-Type": "application/json"})
                 if like_resp.status_code in [200, 201]:
                     results["likes_given"] += 1
         except Exception as e:
@@ -418,7 +419,8 @@ async def engage_cycle():
             reply_auth, _ = build_oauth_header("POST", reply_url)
             if reply_auth:
                 reply_payload = {"text": reply_text, "reply": {"in_reply_to_tweet_id": tweet_id}}
-                reply_resp = await client.post(reply_url, json=reply_payload, headers={"Authorization": reply_auth, "Content-Type": "application/json"})
+                                async with httpx.AsyncClient() as c:
+                    reply_resp = await c.post(reply_url, json=reply_payload, headers={"Authorization": reply_auth, "Content-Type": "application/json"})
                 if reply_resp.status_code in [200, 201]:
                     results["replies_sent"] += 1
         except Exception as e:
