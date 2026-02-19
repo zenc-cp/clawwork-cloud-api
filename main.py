@@ -9,6 +9,10 @@ import re
 import uuid
 import time
 import httpx
+import hmac
+import hashlib
+import base64
+import urllib.parse
 from duckduckgo_search import DDGS
 
 app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="2.2.0")
@@ -144,3 +148,69 @@ def do_research(req: ResearchRequest):
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# OAuth 1.0a helper for X API
+def oauth_sign(method, url, params, consumer_secret, token_secret):
+    sorted_params = sorted(params.items())
+    param_str = "&".join(f"{k}={urllib.parse.quote(str(v), safe='')}" for k, v in sorted_params)
+    base_str = f"{method.upper()}&{urllib.parse.quote(url, safe='')}&{urllib.parse.quote(param_str, safe='')}"
+    signing_key = f"{urllib.parse.quote(consumer_secret, safe='')}&{urllib.parse.quote(token_secret, safe='')}"
+    sig = base64.b64encode(hmac.new(signing_key.encode(), base_str.encode(), hashlib.sha1).digest()).decode()
+    return sig
+
+class TweetRequest(BaseModel):
+    text: str
+
+@app.post("/tweet")
+async def post_tweet(req: TweetRequest):
+    ck = os.getenv("X_CONSUMER_KEY", "")
+    cs = os.getenv("X_CONSUMER_SECRET", "")
+    at = os.getenv("X_ACCESS_TOKEN", "")
+    ats = os.getenv("X_ACCESS_TOKEN_SECRET", "")
+    if not all([ck, cs, at, ats]):
+        raise HTTPException(status_code=500, detail="X API credentials not configured")
+    api_url = "https://api.x.com/2/tweets"
+    oauth_params = {
+        "oauth_consumer_key": ck,
+        "oauth_nonce": uuid.uuid4().hex,
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time())),
+        "oauth_token": at,
+        "oauth_version": "1.0",
+    }
+    sig = oauth_sign("POST", api_url, oauth_params, cs, ats)
+    oauth_params["oauth_signature"] = sig
+    auth_parts = []
+    for k, v in sorted(oauth_params.items()):
+        auth_parts.append(f'{k}="{urllib.parse.quote(v, safe="")}"')
+    auth_header = "OAuth " + ", ".join(auth_parts)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json={"text": req.text}, headers={"Authorization": auth_header, "Content-Type": "application/json"})
+    return {"status": resp.status_code, "response": resp.json()}
+
+@app.get("/tweet")
+async def get_tweet(text: str = "Hello from ClawWork!"):
+    ck = os.getenv("X_CONSUMER_KEY", "")
+    cs = os.getenv("X_CONSUMER_SECRET", "")
+    at = os.getenv("X_ACCESS_TOKEN", "")
+    ats = os.getenv("X_ACCESS_TOKEN_SECRET", "")
+    if not all([ck, cs, at, ats]):
+        raise HTTPException(status_code=500, detail="X API credentials not configured")
+    api_url = "https://api.x.com/2/tweets"
+    oauth_params = {
+        "oauth_consumer_key": ck,
+        "oauth_nonce": uuid.uuid4().hex,
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time())),
+        "oauth_token": at,
+        "oauth_version": "1.0",
+    }
+    sig = oauth_sign("POST", api_url, oauth_params, cs, ats)
+    oauth_params["oauth_signature"] = sig
+    auth_parts = []
+    for k, v in sorted(oauth_params.items()):
+        auth_parts.append(f'{k}="{urllib.parse.quote(v, safe="")}"')
+    auth_header = "OAuth " + ", ".join(auth_parts)
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json={"text": text}, headers={"Authorization": auth_header, "Content-Type": "application/json"})
+    return {"status": resp.status_code, "response": resp.json()}
