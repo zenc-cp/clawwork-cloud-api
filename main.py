@@ -15,6 +15,8 @@ import base64
 import urllib.parse
 import random
 from duckduckgo_search import DDGS
+import ccxt
+import asyncio
 
 app = FastAPI(title="ClawWork Cloud API + OpenClaw Research", version="3.0.0")              # Economic Tracker
 class EconomicTracker:
@@ -672,6 +674,231 @@ async def crypto_deactivate():
 async def crypto_trades():
     return {"trades": crypto_monitor.trades, "total": len(crypto_monitor.trades)}
 
+# ============================================================
+# CCXT DCA BACKGROUND TASK v1.0
+# Uses ccxt for multi-exchange DCA (Dollar Cost Averaging)
+# ============================================================
+
+dca_task_handle = None  # asyncio task reference
+
+class CcxtDCABot:
+    def __init__(self):
+        self.exchange_id = os.getenv("CRYPTO_EXCHANGE", "binance")
+        self.api_key = os.getenv("CRYPTO_API_KEY", "")
+        self.api_secret = os.getenv("CRYPTO_API_SECRET", "")
+        self.passphrase = os.getenv("CRYPTO_PASSPHRASE", "")  # for OKX
+        self.dca_pairs = os.getenv("DCA_PAIRS", "BTC/USDT,ETH/USDT").split(",")
+        self.dca_amount_usdt = float(os.getenv("DCA_AMOUNT", "10.0"))
+        self.dca_interval_hours = float(os.getenv("DCA_INTERVAL_HOURS", "24"))
+        self.is_running = False
+        self.exchange = None
+        self.dca_log = []
+        self.total_bought = {}
+        self.total_spent = 0.0
+        self.errors = []
+
+    def init_exchange(self):
+        """Initialize ccxt exchange instance"""
+        if not self.api_key:
+            return False
+        exchange_class = getattr(ccxt, self.exchange_id, None)
+        if not exchange_class:
+            self.errors.append(f"Exchange {self.exchange_id} not supported by ccxt")
+            return False
+        config = {
+            "apiKey": self.api_key,
+            "secret": self.api_secret,
+            "enableRateLimit": True,
+        }
+        if self.passphrase:
+            config["password"] = self.passphrase
+        try:
+            self.exchange = exchange_class(config)
+            self.exchange.load_markets()
+            return True
+        except Exception as e:
+            self.errors.append(f"Exchange init error: {str(e)}")
+            return False
+
+    def fetch_ticker(self, symbol: str) -> dict:
+        """Get current price via ccxt"""
+        try:
+            if not self.exchange:
+                if not self.init_exchange():
+                    return {"error": "Exchange not initialized"}
+            ticker = self.exchange.fetch_ticker(symbol)
+            return {
+                "symbol": symbol,
+                "last": ticker["last"],
+                "bid": ticker["bid"],
+                "ask": ticker["ask"],
+                "volume": ticker.get("baseVolume"),
+                "timestamp": ticker.get("datetime"),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def execute_dca_buy(self, symbol: str, usdt_amount: float) -> dict:
+        """Execute a market buy order for DCA"""
+        try:
+            if not self.exchange:
+                if not self.init_exchange():
+                    return {"error": "Exchange not initialized"}
+            ticker = self.exchange.fetch_ticker(symbol)
+            price = ticker["last"]
+            amount = usdt_amount / price
+            # Use create_market_buy_order for DCA
+            order = self.exchange.create_market_buy_order(symbol, amount)
+            trade_record = {
+                "trade_id": f"DCA-{uuid.uuid4().hex[:8]}",
+                "symbol": symbol,
+                "side": "buy",
+                "usdt_spent": usdt_amount,
+                "amount_received": order.get("filled", amount),
+                "avg_price": order.get("average", price),
+                "order_id": order.get("id"),
+                "status": order.get("status", "filled"),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            self.dca_log.append(trade_record)
+            self.total_spent += usdt_amount
+            base = symbol.split("/")[0]
+            self.total_bought[base] = self.total_bought.get(base, 0) + trade_record["amount_received"]
+            tracker.track_cost(0.01)  # track API cost
+            return trade_record
+        except Exception as e:
+            error_record = {
+                "symbol": symbol,
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+            self.errors.append(error_record)
+            return error_record
+
+    def get_balances(self) -> dict:
+        """Fetch account balances via ccxt"""
+        try:
+            if not self.exchange:
+                if not self.init_exchange():
+                    return {"error": "Exchange not initialized"}
+            balance = self.exchange.fetch_balance()
+            return {
+                "free": {k: v for k, v in balance["free"].items() if v > 0},
+                "used": {k: v for k, v in balance["used"].items() if v > 0},
+                "total": {k: v for k, v in balance["total"].items() if v > 0},
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_status(self) -> dict:
+        return {
+            "exchange": self.exchange_id,
+            "is_running": self.is_running,
+            "api_configured": bool(self.api_key),
+            "dca_pairs": self.dca_pairs,
+            "dca_amount_usdt": self.dca_amount_usdt,
+            "dca_interval_hours": self.dca_interval_hours,
+            "total_dca_trades": len(self.dca_log),
+            "total_spent_usdt": round(self.total_spent, 2),
+            "total_bought": self.total_bought,
+            "recent_trades": self.dca_log[-5:] if self.dca_log else [],
+            "recent_errors": self.errors[-5:] if self.errors else [],
+        }
+
+dca_bot = CcxtDCABot()
+
+async def dca_background_loop():
+    """Background task: executes DCA buys at configured intervals"""
+    while dca_bot.is_running:
+        for pair in dca_bot.dca_pairs:
+            pair = pair.strip()
+            if not pair:
+                continue
+            per_pair_amount = dca_bot.dca_amount_usdt / len(dca_bot.dca_pairs)
+            result = dca_bot.execute_dca_buy(pair, per_pair_amount)
+            print(f"[DCA] {pair}: {result}")
+            await asyncio.sleep(1)  # rate limit between pairs
+        interval_secs = dca_bot.dca_interval_hours * 3600
+        print(f"[DCA] Cycle complete. Next run in {dca_bot.dca_interval_hours}h")
+        await asyncio.sleep(interval_secs)
+
+# DCA Bot API Endpoints
+@app.get("/dca/status")
+async def dca_status():
+    return dca_bot.get_status()
+
+@app.post("/dca/start")
+async def dca_start():
+    global dca_task_handle
+    if not dca_bot.api_key:
+        return {"error": "CRYPTO_API_KEY not set. Configure exchange credentials first.", "setup": "/crypto/requirements"}
+    if dca_bot.is_running:
+        return {"message": "DCA bot is already running", "status": dca_bot.get_status()}
+    if not dca_bot.init_exchange():
+        return {"error": "Failed to initialize exchange", "errors": dca_bot.errors[-3:]}
+    dca_bot.is_running = True
+    dca_task_handle = asyncio.create_task(dca_background_loop())
+    return {"message": "DCA bot started", "status": dca_bot.get_status()}
+
+@app.post("/dca/stop")
+async def dca_stop():
+    global dca_task_handle
+    dca_bot.is_running = False
+    if dca_task_handle:
+        dca_task_handle.cancel()
+        dca_task_handle = None
+    return {"message": "DCA bot stopped", "status": dca_bot.get_status()}
+
+@app.post("/dca/buy-now")
+async def dca_buy_now(symbol: str = "BTC/USDT", amount: float = 10.0):
+    """Manual one-time DCA buy"""
+    if not dca_bot.api_key:
+        return {"error": "CRYPTO_API_KEY not set"}
+    if not dca_bot.exchange:
+        if not dca_bot.init_exchange():
+            return {"error": "Failed to initialize exchange"}
+    result = dca_bot.execute_dca_buy(symbol, amount)
+    return result
+
+@app.get("/dca/ticker/{symbol}")
+async def dca_ticker(symbol: str):
+    """Get price for a symbol via ccxt"""
+    formatted = symbol.replace("-", "/").upper()
+    if not dca_bot.exchange:
+        dca_bot.init_exchange()
+    return dca_bot.fetch_ticker(formatted)
+
+@app.get("/dca/balances")
+async def dca_balances():
+    """Get exchange balances via ccxt"""
+    return dca_bot.get_balances()
+
+@app.get("/dca/log")
+async def dca_log():
+    return {"trades": dca_bot.dca_log, "total": len(dca_bot.dca_log), "total_spent": round(dca_bot.total_spent, 2)}
+
+@app.post("/dca/configure")
+async def dca_configure(
+    pairs: Optional[str] = None,
+    amount: Optional[float] = None,
+    interval_hours: Optional[float] = None,
+    exchange: Optional[str] = None,
+):
+    """Update DCA configuration (stops bot if running)"""
+    was_running = dca_bot.is_running
+    if was_running:
+        await dca_stop()
+    if pairs:
+        dca_bot.dca_pairs = [p.strip() for p in pairs.split(",")]
+    if amount:
+        dca_bot.dca_amount_usdt = amount
+    if interval_hours:
+        dca_bot.dca_interval_hours = interval_hours
+    if exchange:
+        dca_bot.exchange_id = exchange
+        dca_bot.exchange = None  # force re-init
+    return {"message": "DCA configuration updated", "was_running": was_running, "status": dca_bot.get_status()}
+
 
 # ============================================================
 # GOOGLE WORKSPACE INTEGRATION (Gmail + Calendar)
@@ -743,4 +970,26 @@ async def unified_dashboard():
         "crypto": crypto_monitor.get_status(),
         "google": google_workspace.get_status(),
         "x_automation": {"configured": bool(os.getenv("X_API_KEY", ""))},
+                "dca_bot": dca_bot.get_status(),
     }
+
+
+# Startup event: auto-start DCA if configured
+@app.on_event("startup")
+async def on_startup():
+    auto_start = os.getenv("DCA_AUTO_START", "false").lower() == "true"
+    if auto_start and dca_bot.api_key:
+        if dca_bot.init_exchange():
+            global dca_task_handle
+            dca_bot.is_running = True
+            dca_task_handle = asyncio.create_task(dca_background_loop())
+            print(f"[DCA] Auto-started: {dca_bot.dca_pairs} @ ${dca_bot.dca_amount_usdt} every {dca_bot.dca_interval_hours}h")
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    global dca_task_handle
+    dca_bot.is_running = False
+    if dca_task_handle:
+        dca_task_handle.cancel()
+        dca_task_handle = None
+    print("[DCA] Bot stopped on shutdown")
